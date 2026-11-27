@@ -24,7 +24,7 @@ spring:
       base-url: https://openrouter.ai/api
       chat:
         options:
-          model: cohere/north-mini-code:free
+          model: ${OPENROUTER_MODEL:openrouter/free}
           temperature: 0.0
 
 

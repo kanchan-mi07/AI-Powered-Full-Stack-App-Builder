@@ -48,7 +48,8 @@ public class AiGenerationServiceImpl implements AiGenerationService {
     private final ChatEventRepository chatEventRepository;
     private final CodeSanitizer codeSanitizer;
 
-    private static final Pattern FILE_TAG_PATTERN = Pattern.compile("<file path=\"([^\"]+)\">(.*?)</file>", Pattern.DOTALL);
+    private static final Pattern FILE_TAG_PATTERN = Pattern.compile("<file path=\"([^\"]+)\">(.*?)</file>",
+            Pattern.DOTALL);
 
     @Override
     @PreAuthorize("@security.canEditProject(#projectId)")
@@ -59,8 +60,7 @@ public class AiGenerationServiceImpl implements AiGenerationService {
 
         Map<String, Object> advisorParams = Map.of(
                 "userId", userId,
-                "projectId", projectId
-        );
+                "projectId", projectId);
 
         StringBuilder fullResponseBuffer = new StringBuilder();
         CodeGenerationTools codeGenerationTools = new CodeGenerationTools(projectFileService, projectId);
@@ -74,31 +74,73 @@ public class AiGenerationServiceImpl implements AiGenerationService {
                 .user(userMessage)
                 .tools(codeGenerationTools)
                 .advisors(advisorSpec -> {
-                            advisorSpec.params(advisorParams);
-                            advisorSpec.advisors(fileTreeContextAdvisor);
-                        }
-                )
+                    advisorSpec.params(advisorParams);
+                    advisorSpec.advisors(fileTreeContextAdvisor);
+                })
                 .stream()
                 .chatResponse()
                 .doOnNext(response -> {
                     String content = response.getResult().getOutput().getText();
 
-                    if(content != null && !content.isEmpty() && endTime.get() == 0) { // first non-empty chunk received
+                    if (content != null && !content.isEmpty() && endTime.get() == 0) { // first non-empty chunk received
                         endTime.set(System.currentTimeMillis());
                     }
 
-                    if(response.getMetadata().getUsage() != null) {
+                    if (response.getMetadata().getUsage() != null) {
                         usageRef.set(response.getMetadata().getUsage());
                     }
 
                     fullResponseBuffer.append(content);
                 })
+                .concatWith(Flux.defer(() -> {
+                    boolean hasFiles = llmResponseParser.parseChatEvents(fullResponseBuffer.toString(), null)
+                            .stream()
+                            .anyMatch(event -> event.getType() == ChatEventType.FILE_EDIT);
+                    if (hasFiles) {
+                        return Flux.empty();
+                    }
+
+                    log.warn(
+                            "No generated files in first response for projectId {}. Requesting one code-only continuation.",
+                            projectId);
+                    String continuationSystemPrompt = PromptUtils.CODE_GENERATION_SYSTEM_PROMPT
+                            + """
+
+
+                                    ## Continuation Override
+                                    The previous assistant response stopped before producing code. Continue the same request now.
+                                    Do not plan, summarize, or call tools. Use the supplied file contents and output complete Markdown code blocks for the files that implement the user's request.
+                                    Each code block must start with a comment containing its project-relative path, such as // src/App.tsx.
+                                    """;
+                    String continuationUserPrompt = "Original user request:\n" + userMessage
+                            + "\n\nPrevious assistant response:\n" + fullResponseBuffer
+                            + "\n\nProject files already read:\n" + codeGenerationTools.getReadFilesContext()
+                            + "\n\nContinue by outputting the complete changed file contents now.";
+
+                    return chatClient.prompt()
+                            .system(continuationSystemPrompt)
+                            .user(continuationUserPrompt)
+                            .stream()
+                            .chatResponse()
+                            .doOnNext(response -> {
+                                String content = response.getResult().getOutput().getText();
+                                if (content != null && !content.isEmpty() && endTime.get() == 0) {
+                                    endTime.set(System.currentTimeMillis());
+                                }
+                                if (response.getMetadata().getUsage() != null) {
+                                    usageRef.set(response.getMetadata().getUsage());
+                                }
+                                fullResponseBuffer.append(content);
+                            });
+                }))
                 .doOnComplete(() -> {
                     try {
                         long duration = (endTime.get() - startTime.get()) / 1000;
-                        finalizeChats(userMessage, chatSession, fullResponseBuffer.toString(), duration, usageRef.get());
+                        finalizeChats(userMessage, chatSession, fullResponseBuffer.toString(), duration,
+                                usageRef.get());
                     } catch (Exception e) {
-                        log.error("Error finalizing chats and saving files for projectId {}: {}", projectId, e.getMessage(), e);
+                        log.error("Error finalizing chats and saving files for projectId {}: {}", projectId,
+                                e.getMessage(), e);
                     }
                 })
                 .doOnError(error -> log.error("Error during streaming for projectId: {}", projectId))
@@ -108,7 +150,8 @@ public class AiGenerationServiceImpl implements AiGenerationService {
                 });
     }
 
-    private void finalizeChats(String userMessage, ChatSession chatSession, String fullText, Long duration, Usage usage) {
+    private void finalizeChats(String userMessage, ChatSession chatSession, String fullText, Long duration,
+            Usage usage) {
         Long projectId = chatSession.getProject().getId();
 
         Integer promptTokens = usage != null ? usage.getPromptTokens() : 0;
@@ -121,8 +164,7 @@ public class AiGenerationServiceImpl implements AiGenerationService {
                         .role(MessageRole.USER)
                         .content(userMessage)
                         .tokensUsed(promptTokens)
-                        .build()
-        );
+                        .build());
 
         ChatMessage assistantChatMessage = ChatMessage.builder()
                 .role(MessageRole.ASSISTANT)
@@ -135,16 +177,17 @@ public class AiGenerationServiceImpl implements AiGenerationService {
 
         List<ChatEvent> chatEventList = llmResponseParser.parseChatEvents(fullText, assistantChatMessage);
         chatEventList.addFirst(ChatEvent.builder()
-                        .type(ChatEventType.THOUGHT)
-                        .chatMessage(assistantChatMessage)
-                        .content("Thought for "+duration+"s")
-                        .sequenceOrder(0)
+                .type(ChatEventType.THOUGHT)
+                .chatMessage(assistantChatMessage)
+                .content("Thought for " + duration + "s")
+                .sequenceOrder(0)
                 .build());
 
         // Run import/export sanitizer across all generated files before saving
         Map<String, String> fileMap = new java.util.HashMap<>();
         chatEventList.stream()
-                .filter(e -> e.getType() == ChatEventType.FILE_EDIT && e.getFilePath() != null && e.getContent() != null)
+                .filter(e -> e.getType() == ChatEventType.FILE_EDIT && e.getFilePath() != null
+                        && e.getContent() != null)
                 .forEach(e -> fileMap.put(e.getFilePath(), e.getContent()));
 
         codeSanitizer.sanitize(fileMap);
@@ -153,7 +196,8 @@ public class AiGenerationServiceImpl implements AiGenerationService {
                 .filter(e -> e.getType() == ChatEventType.FILE_EDIT && e.getFilePath() != null)
                 .forEach(e -> {
                     String sanitized = fileMap.get(e.getFilePath());
-                    if (sanitized != null) e.setContent(sanitized);
+                    if (sanitized != null)
+                        e.setContent(sanitized);
                     projectFileService.saveFile(projectId, e.getFilePath(), e.getContent());
                 });
 
@@ -164,7 +208,7 @@ public class AiGenerationServiceImpl implements AiGenerationService {
         ChatSessionId chatSessionId = new ChatSessionId(projectId, userId);
         ChatSession chatSession = chatSessionRepository.findById(chatSessionId).orElse(null);
 
-        if(chatSession == null) {
+        if (chatSession == null) {
             Project project = projectRepository.findById(projectId)
                     .orElseThrow(() -> new ResourceNotFoundException("Project", projectId.toString()));
             User user = userRepository.findById(userId)

@@ -15,7 +15,7 @@ services:
     restart: unless-stopped
 
   minio:
-    image: quay.io/minio/minio:latest
+    image: cgr.dev/chainguard/minio:latest
     container_name: minio-lovable
     command: server /data --console-address ":9001"
     environment:

@@ -8,6 +8,8 @@ import org.springframework.ai.tool.annotation.ToolParam;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 @RequiredArgsConstructor
 @Slf4j
@@ -15,27 +17,33 @@ public class CodeGenerationTools {
 
     private final ProjectFileService projectFileService;
     private final Long projectId;
+    private final Map<String, String> readFileContents = new ConcurrentHashMap<>();
 
-    @Tool(name = "read_files",
-            description = "Read the content of files. Only input the file names present inside the FILE_TREE. DO NOT input any path which is not present under the FILE_TREE.")
+    public String getReadFilesContext() {
+        return readFileContents.entrySet().stream()
+                .sorted(Map.Entry.comparingByKey())
+                .map(entry -> "--- START OF FILE: " + entry.getKey() + " ---\n"
+                        + entry.getValue() + "\n--- END OF FILE ---")
+                .collect(java.util.stream.Collectors.joining("\n\n"));
+    }
+
+    @Tool(name = "read_files", description = "Read the content of files. Only input the file names present inside the FILE_TREE. DO NOT input any path which is not present under the FILE_TREE.")
     public List<String> readFiles(
-            @ToolParam(description = "List of relative paths (e.g., ['src/App.tsx'])")
-            List<String> paths
-    ) {
+            @ToolParam(description = "List of relative paths (e.g., ['src/App.tsx'])") List<String> paths) {
 
         List<String> result = new ArrayList<>();
 
-        for(String path: paths) {
+        for (String path : paths) {
             String cleanPath = path.startsWith("/") ? path.substring(1) : path;
 
             log.info("Requested file: {}", cleanPath);
 
             String content = projectFileService.getFileContent(projectId, cleanPath).content();
+            readFileContents.put(cleanPath, content);
 
             result.add(String.format(
                     "--- START OF FILE: %s ---\n%s\n--- END OF FILE ---",
-                    cleanPath, content
-            ));
+                    cleanPath, content));
 
         }
 
